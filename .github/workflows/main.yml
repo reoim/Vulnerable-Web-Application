@@ -40,19 +40,23 @@ jobs:
           chmod +x cm
           sudo mv cm /usr/local/bin/cm
 
-      # 5. Initialize CodeMender configuration
+      # 5. Initialize CodeMender configuration and set output format to SARIF
       - name: Initialize CodeMender Configuration
         run: |
           cm init
+          # Set output format to SARIF for GitHub Security integration
+          sed -i 's/format: "table"/format: "sarif"/' ~/.codemender/config.yaml
+          sed -i 's/format: table/format: sarif/' ~/.codemender/config.yaml
 
-      # 6. Run CodeMender scan on the entire repository
+      # 6. Run CodeMender scan on the entire repository and extract JSON only
       - name: Run CodeMender Scan
         run: |
-          cm find . > codemender-results.sarif || true
+          # Execute scan and strip out non-JSON log messages (lines before '{')
+          cm find . | sed -n '/^{/,$p' > codemender-results.sarif || true
 
       # 7. Upload SARIF file to GitHub Security (Code Scanning) tab
       - name: Upload SARIF file to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: codemender-results.sarif
