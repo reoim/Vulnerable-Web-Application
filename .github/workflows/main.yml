@@ -1,0 +1,86 @@
+name: CodeMender Security Scan
+
+on:
+  push:
+    branches: [ "main", "master" ]
+
+# Required permissions for GitHub Security (Code Scanning) integration
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repository code (includes full commit history for incremental scanning)
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2. Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # 3. Set up Cloud SDK and configure GCP project
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure GCP Project
+        run: |
+          gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+
+      # 4. Download and install CodeMender CLI (cm) via curl
+      - name: Install CodeMender CLI
+        run: |
+          curl -L -o cm-linux-amd64.zip "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media"
+          unzip cm-linux-amd64.zip
+          chmod +x cm
+          sudo mv cm /usr/local/bin/cm
+
+      # 5. Configure output format to SARIF in config.yaml
+      - name: Configure SARIF Output Format
+        run: |
+          if [ -f config.yaml ]; then
+            sed -i 's/format: "table"/format: "sarif"/' config.yaml
+            sed -i 's/format: table/format: sarif/' config.yaml
+          else
+            echo "output:" > config.yaml
+            echo "  format: sarif" >> config.yaml
+          fi
+
+      # 6. Extract changed files, run cm find scan, and generate SARIF
+      - name: Run CodeMender on Changed Files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR event: Extract changed files compared to target branch
+            git fetch origin ${{ github.base_ref }}
+            CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(py|js|ts|go|java|c|cpp|h|rb|php)$' || true)
+          else
+            # Push event: Extract changed files compared to previous commit
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E '\.(py|js|ts|go|java|c|cpp|h|rb|php)$' || true)
+          fi
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No changed files matching target extensions."
+            # Generate empty SARIF structure to prevent upload error
+            echo '{"$schema":"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json","version":"2.1.0","runs":[]}' > codemender-results.sarif
+          else
+            echo "=== Changed files to scan ==="
+            echo "$CHANGED_FILES"
+            echo "================================"
+
+            # Execute scan and output to SARIF file
+            cm find $CHANGED_FILES > codemender-results.sarif || true
+          fi
+
+      # 7. Upload SARIF file to GitHub Security (Code Scanning) tab
+      - name: Upload SARIF file to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: codemender-results.sarif
