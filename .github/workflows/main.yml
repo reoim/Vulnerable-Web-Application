@@ -1,6 +1,8 @@
 name: CodeMender Security Scan
 
 on:
+  pull_request:
+    branches: [ "main", "master" ]
   push:
     branches: [ "main", "master" ]
 
@@ -40,35 +42,34 @@ jobs:
           chmod +x cm
           sudo mv cm /usr/local/bin/cm
 
-      # 5. Initialize CodeMender configuration and set output format to SARIF
-      - name: Initialize CodeMender Configuration
+      # 5. Initialize config via cm init and modify specific fields for CI/CD
+      - name: Initialize and Update CodeMender Configuration
         run: |
+          # 1) Generate default config file at ~/.codemender/config.yaml
           cm init
+
+          # 2) Modify generated config.yaml fields
           sed -i 's/format: "table"/format: "sarif"/' ~/.codemender/config.yaml
-          sed -i 's/format: table/format: sarif/' ~/.codemender/config.yaml
+          sed -i 's/format: table/format: "sarif"/' ~/.codemender/config.yaml
+          sed -i 's/type: ""/type: "git"/' ~/.codemender/config.yaml
           sed -i 's/confirm_commands: true/confirm_commands: false/' ~/.codemender/config.yaml
           sed -i 's/confirm_writes: true/confirm_writes: false/' ~/.codemender/config.yaml
- 
-      # 6. Run CodeMender scan and extract error logs
+
+          # 3) Print updated config to verify settings in logs
+          echo "=== Updated ~/.codemender/config.yaml ==="
+          cat ~/.codemender/config.yaml
+
+      # 6. Run CodeMender scan
       - name: Run CodeMender Scan
         run: |
           echo "=== Starting CodeMender Find ==="
-          
-          # Execute scan with --yes flag and log stderr separately
           cm find . --yes > raw_output.txt 2> cm_stderr.log || true
-
-          echo "=== CodeMender Error Log (stderr) ==="
-          cat cm_stderr.log
-
-          echo "=== CodeMender Output Log (stdout) ==="
-          head -n 30 raw_output.txt
 
           # Extract JSON starting from '{'
           sed -n '/^{/,$p' raw_output.txt > codemender-results.sarif
 
-          # Fallback check
+          # Minimum valid SARIF fallback if scan fails or yields no JSON
           if [ ! -s codemender-results.sarif ] || ! jq . codemender-results.sarif > /dev/null 2>&1; then
-            echo "Warning: Valid SARIF output not generated. Using fallback SARIF."
             cat << 'EOF' > codemender-results.sarif
           {
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -88,7 +89,43 @@ jobs:
           EOF
           fi
 
-      # 7. Upload SARIF file to GitHub Security (Code Scanning) tab
+      # 7. Print Scan Summary Report in Logs and Job Summary
+      - name: Display Scan Report
+        run: |
+          echo "=========================================="
+          echo "       CodeMender Scan Summary            "
+          echo "=========================================="
+
+          TOTAL_FINDINGS=$(jq '[.runs[].results[]?] | length' codemender-results.sarif 2>/dev/null || echo "0")
+          echo "Total Vulnerabilities Detected: $TOTAL_FINDINGS"
+          echo "------------------------------------------"
+
+          if [ "$TOTAL_FINDINGS" -gt 0 ]; then
+            echo "Vulnerability List:"
+            jq -r '.runs[].results[]? | "  - Rule: \(.ruleId // "N/A") | File: \(.locations[0].physicalLocation.artifactLocation.uri // "Unknown"):\(.locations[0].physicalLocation.region.startLine // "1") | Details: \(.message.text // "No description")"' codemender-results.sarif
+
+            echo "### 🛡️ CodeMender Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+            echo "**Total Vulnerabilities Detected:** \`$TOTAL_FINDINGS\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Rule ID | Location | Description |" >> $GITHUB_STEP_SUMMARY
+            echo "| --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
+            jq -r '.runs[].results[]? | "| \(.ruleId // "N/A") | \(.locations[0].physicalLocation.artifactLocation.uri // "Unknown"):\(.locations[0].physicalLocation.region.startLine // "1") | \(.message.text // "N/A") |"' codemender-results.sarif >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No security vulnerabilities found in the codebase."
+            
+            echo "### 🛡️ CodeMender Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **No vulnerabilities found.**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "=========================================="
+
+          if [ -s cm_stderr.log ]; then
+            echo ""
+            echo "=== CodeMender CLI Stderr Log ==="
+            cat cm_stderr.log
+          fi
+
+      # 8. Upload SARIF file to GitHub Security (Code Scanning) tab
       - name: Upload SARIF file to GitHub Security
         uses: github/codeql-action/upload-sarif@v4
         if: always()
