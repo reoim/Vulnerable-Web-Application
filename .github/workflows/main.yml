@@ -1,8 +1,6 @@
 name: CodeMender Security Scan
 
 on:
-  pull_request:
-    branches: [ "main", "master" ]
   push:
     branches: [ "main", "master" ]
 
@@ -45,30 +43,23 @@ jobs:
       # 5. Initialize config via cm init and modify specific fields for CI/CD
       - name: Initialize and Update CodeMender Configuration
         run: |
-          # 1) Generate default config file at ~/.codemender/config.yaml
           cm init
-
-          # 2) Modify generated config.yaml fields
           sed -i 's/format: "table"/format: "sarif"/' ~/.codemender/config.yaml
           sed -i 's/format: table/format: "sarif"/' ~/.codemender/config.yaml
           sed -i 's/type: ""/type: "git"/' ~/.codemender/config.yaml
           sed -i 's/confirm_commands: true/confirm_commands: false/' ~/.codemender/config.yaml
           sed -i 's/confirm_writes: true/confirm_writes: false/' ~/.codemender/config.yaml
 
-          # 3) Print updated config to verify settings in logs
-          echo "=== Updated ~/.codemender/config.yaml ==="
-          cat ~/.codemender/config.yaml
-
-      # 6. Run CodeMender scan
+      # 6. Run CodeMender scan (Save temp output to /tmp to prevent deletion by git clean)
       - name: Run CodeMender Scan
         run: |
           echo "=== Starting CodeMender Find ==="
-          cm find . --yes > raw_output.txt 2> cm_stderr.log || true
+          cm find . --yes > /tmp/raw_output.txt 2> /tmp/cm_stderr.log || true
 
           # Extract JSON starting from '{'
-          sed -n '/^{/,$p' raw_output.txt > codemender-results.sarif
+          sed -n '/^{/,$p' /tmp/raw_output.txt > codemender-results.sarif
 
-          # Minimum valid SARIF fallback if scan fails or yields no JSON
+          # Fallback to valid empty SARIF if scan produced invalid JSON or failed
           if [ ! -s codemender-results.sarif ] || ! jq . codemender-results.sarif > /dev/null 2>&1; then
             cat << 'EOF' > codemender-results.sarif
           {
@@ -119,10 +110,10 @@ jobs:
 
           echo "=========================================="
 
-          if [ -s cm_stderr.log ]; then
+          if [ -s /tmp/cm_stderr.log ]; then
             echo ""
             echo "=== CodeMender CLI Stderr Log ==="
-            cat cm_stderr.log
+            cat /tmp/cm_stderr.log
           fi
 
       # 8. Upload SARIF file to GitHub Security (Code Scanning) tab
